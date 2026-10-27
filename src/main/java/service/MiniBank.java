@@ -1,24 +1,44 @@
 package service;
 
-import model.*;
+import exception.BankException;
+import exception.InsufficientFundsException;
+import model.Account;
+import model.BankInfo;
+import model.Command;
+import model.MenuOption;
+import model.SavingsAccount;
+import model.TransactionType;
+import model.WithdrawRule;
 import repository.AccountRepository;
-import exception.*;
-import util.Validator;
-import java.nio.file.*;
+import util.CommandParser;
+import util.StatementFormatter;
 import java.io.IOException;
-import java.util.*;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Scanner;
 
 public class MiniBank {
     private static final Path DATA_FILE = Path.of("data", "accounts.txt");
+    private static final Path STATE_FILE = Path.of("data", "accounts.ser");
+    private static final Path LOG_DIRECTORY = Path.of("data", "logs");
+    private static final Path REPORT_FILE = Path.of("data", "end-of-day-report.txt");
     private final Scanner sc = new Scanner(System.in);
     private final BankService bank = new BankService(new AccountRepository());
 
-    public static void main(String[] args) { new MiniBank().run(); }
+    public static void main(String[] args) {
+        if (Arrays.asList(args).contains("--practical-demo")) {
+            PracticalDemo.run();
+            return;
+        }
+        new MiniBank().run();
+    }
 
     private void run() {
-        try { bank.load(DATA_FILE); System.out.println("Saved accounts loaded."); }
+        try { bank.loadState(STATE_FILE, DATA_FILE); System.out.println("Saved accounts loaded."); }
         catch (IOException | RuntimeException ex) { System.out.println("Could not load saved data: " + ex.getMessage()); }
-        System.out.println(new BankInfo("MiniBank", "Mon-Sat 9:00 AM - 5:00 PM", "support@minibank.example"));
+        System.out.println(new BankInfo("MiniBank", "Ahmedabad"));
         boolean running = true;
         while (running) {
             printMenu();
@@ -43,13 +63,18 @@ public class MiniBank {
                     case STATEMENT -> statement();
                     case LIST_ACCOUNTS -> listAccounts();
                     case REPORT -> report();
-                    case BATCH -> batchDemo();
-                    case EXIT -> { bank.save(DATA_FILE); System.out.println("Data saved. Thank you for using MiniBank."); running = false; }
+                    case BATCH -> batchTransactions();
+                    case EXIT -> {
+                        bank.saveState(STATE_FILE, DATA_FILE);
+                        System.out.println("Data saved. Thank you for using MiniBank.");
+                        running = false;
+                    }
                 }
             } catch (BankException ex) {
                 System.out.println("Banking error: " + ex.getMessage());
                 if (ex instanceof InsufficientFundsException funds) System.out.println("Shortfall: " + funds.getShortfall());
             } catch (IOException ex) { System.out.println("File error: " + ex.getMessage()); }
+            catch (IllegalArgumentException ex) { System.out.println("Input error: " + ex.getMessage()); }
             finally { System.out.println("----------------------------------------"); }
         }
     }
@@ -63,72 +88,90 @@ public class MiniBank {
         System.out.println("5. Account statement");
         System.out.println("6. List accounts");
         System.out.println("7. Report");
-        System.out.println("8. Batch/concurrency demo");
+        System.out.println("8. Batch transactions");
         System.out.println("9. Save and exit");
         System.out.print("Choose: ");
     }
+
     private void openAccount() throws BankException {
-        System.out.print("Account number: "); String id=sc.nextLine().trim();
         System.out.print("Owner name: "); String owner=sc.nextLine().trim();
         System.out.print("Type (S=savings, C=current, F=fixed): "); String type=sc.nextLine().trim();
         long balance=readLong("Opening balance: ");
         long rule=0;
         if (type.equalsIgnoreCase("S")) rule=readLong("Minimum balance: ");
         else if (type.equalsIgnoreCase("C")) rule=readLong("Overdraft limit: ");
-        Account a=bank.openAccount(type,id,owner,balance,rule);
-        System.out.println("Account opened: " + a);
+        Account account=bank.openAccount(type,owner,balance,rule);
+        System.out.println("Account opened: " + account);
     }
+
     private void deposit() throws BankException {
         System.out.print("Account number: "); String id=sc.nextLine().trim();
-        bank.deposit(id,readLong("Deposit amount: ")); System.out.println("Deposit successful.");
+        bank.execute(CommandParser.parse("DEPOSIT " + id + " " + readLong("Deposit amount: ")));
+        System.out.println("Deposit successful.");
     }
+
     private void withdraw() throws BankException {
         System.out.print("Account number: "); String id=sc.nextLine().trim();
-        bank.withdraw(id,readLong("Withdrawal amount: ")); System.out.println("Withdrawal successful.");
+        bank.execute(CommandParser.parse("WITHDRAW " + id + " " + readLong("Withdrawal amount: ")));
+        System.out.println("Withdrawal successful.");
     }
+
     private void transfer() throws BankException {
         System.out.print("From account: "); String from=sc.nextLine().trim();
         System.out.print("To account: "); String to=sc.nextLine().trim();
-        bank.transfer(from,to,readLong("Transfer amount: ")); System.out.println("Transfer successful.");
+        bank.execute(CommandParser.parse("TRANSFER " + from + " " + to + " " + readLong("Transfer amount: ")));
+        System.out.println("Transfer successful.");
     }
+
     private void statement() throws BankException {
         System.out.print("Account number: "); String id=sc.nextLine().trim();
-        Account a=bank.statement(id);
-        System.out.println(a); System.out.printf("Interest rate: %.2f%%%nEstimated yearly interest: %.2f%n",a.interestRate(),a.yearlyInterest());
+        System.out.println(StatementFormatter.buildStatement(bank.statement(id)));
     }
+
     private void listAccounts() {
-        List<Account> accounts=bank.listAccounts();
+        List<Account> accounts=bank.listAccountsSortedByBalance();
         if (accounts.isEmpty()) System.out.println("No accounts found.");
-        else accounts.forEach(System.out::println);
+        else {
+            System.out.println("Accounts sorted by balance:");
+            accounts.forEach(System.out::println);
+        }
     }
+
     private void report() {
         System.out.println("========== BANK REPORT ==========");
         bank.report().forEach((key,value)->System.out.println(key + ": " + value));
+        try { System.out.println(bank.generateEndOfDayReport(LOG_DIRECTORY, REPORT_FILE)); }
+        catch (IOException ex) { System.out.println("Could not generate transaction report: " + ex.getMessage()); }
     }
-    private void batchDemo() {
-        AccountRepository repository = new AccountRepository();
-        SavingsAccount demo = new SavingsAccount("DEMO-THREAD", "Concurrency Demo", 0, 0);
-        try (TransactionProcessor processor = new TransactionProcessor()) {
-            for (int i=0; i<1000; i++) processor.submit(() -> {
-                try { demo.deposit(1); } catch (InvalidAmountException ex) { throw new RuntimeException(ex); }
-            });
+
+    private void batchTransactions() throws BankException {
+        int count = (int) readPositiveLong("Number of transactions in this batch (1-10000): ");
+        List<Command> commands = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            System.out.print("Transaction " + (i + 1) + " (DEPOSIT account amount | WITHDRAW account amount | TRANSFER from to amount): ");
+            try { commands.add(CommandParser.parse(sc.nextLine())); }
+            catch (IllegalArgumentException ex) {
+                System.out.println(ex.getMessage());
+                i--;
+            }
         }
-        System.out.println("Thread-pool demo: 1000 concurrent deposits completed. Final demo balance: " + demo.getBalance());
-        System.out.println("This demonstration account is not saved to your bank data.");
-        WithdrawRule anonymous = new WithdrawRule() {
-            @Override public boolean allow(Account account, long amount) { return account.canWithdraw(amount); }
-        };
-        WithdrawRule lambda = (account, amount) -> account.canWithdraw(amount);
-        System.out.println("Withdraw rule (anonymous class): " + anonymous.allow(demo,1));
-        System.out.println("Withdraw rule (lambda): " + lambda.allow(demo,1));
-        try (ClosableDemo resource = new ClosableDemo()) { resource.use(); }
-        bank.audit();
+        bank.processBatch(commands);
+        System.out.println("Batch completed using the shared thread-safe account store.");
     }
+
     private long readLong(String prompt) {
         while (true) {
             System.out.print(prompt); String raw=sc.nextLine().trim();
             try { return Long.parseLong(raw); }
             catch (NumberFormatException ex) { System.out.println("Please enter a whole number."); }
+        }
+    }
+
+    private long readPositiveLong(String prompt) {
+        while (true) {
+            long value=readLong(prompt);
+            if (value > 0 && value <= 10_000) return value;
+            System.out.println("Enter a value from 1 to 10000.");
         }
     }
 }

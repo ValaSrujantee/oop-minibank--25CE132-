@@ -1,6 +1,9 @@
 target/
 out/
+tmp/
 *.class
 .idea/
 .vscode/
-data/accounts.txt
+data/*.ser
+data/logs/
+data/end-of-day-report.txt

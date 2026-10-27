@@ -1,7 +1,7 @@
 package repository;
 import model.Account;
 import exception.AccountNotFoundException;
-import java.io.*;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -9,19 +9,43 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.Base64;
 
-public class AccountRepository implements Repository<Account> {
-    private final ConcurrentMap<String, Account> accounts = new ConcurrentHashMap<>();
-    @Override public void save(Account account) { accounts.put(account.getAccountNumber(), account); }
-    @Override public Optional<Account> findById(String id) { return Optional.ofNullable(accounts.get(id)); }
-    @Override public List<Account> findAll() {
-        List<Account> result = new ArrayList<>(accounts.values());
-        result.sort(Comparator.comparing(Account::getAccountNumber));
+public class AccountRepository extends Repository<Account> {
+    private final ConcurrentMap<String, Account> accounts;
+
+    public AccountRepository() {
+        this(new ConcurrentHashMap<>());
+    }
+
+    private AccountRepository(ConcurrentMap<String, Account> accounts) {
+        super(accounts);
+        this.accounts = accounts;
+    }
+
+    @Override public Account save(Account account) {
+        if (account == null) throw new IllegalArgumentException("Account is required.");
+        Account.observePersistedAccountNumber(account.getAccountNumber());
+        accounts.put(account.getAccountNumber(), account);
+        return account;
+    }
+
+    @Override public Account findById(String id) { return accounts.get(id); }
+    @Override public ArrayList<Account> findAll() {
+        ArrayList<Account> result = new ArrayList<>(accounts.values());
+        result.sort(Comparator.naturalOrder());
         return result;
     }
-    @Override public boolean deleteById(String id) { return accounts.remove(id) != null; }
+
+    @Override public boolean delete(String id) { return accounts.remove(id) != null; }
+    public boolean deleteById(String id) { return delete(id); }
+
     public Account require(String id) throws AccountNotFoundException {
-        return findById(id).orElseThrow(() -> new AccountNotFoundException("Account not found: " + id));
+        Account account = findById(id);
+        if (account == null) throw new AccountNotFoundException("Account not found: " + id);
+        return account;
     }
+
+    public ConcurrentMap<String, Account> sharedAccounts() { return accounts; }
+
     public void load(Path path) throws IOException {
         if (!Files.exists(path)) return;
         for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
